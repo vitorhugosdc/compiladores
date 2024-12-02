@@ -3,7 +3,89 @@
     #include<stdlib.h>
     #include<string.h>    
     #include<ctype.h>
-    #include"lex.yy.c"
+
+    #include <llvm-c/Core.h>
+    #include <llvm-c/ExecutionEngine.h>
+    #include <llvm-c/Target.h>
+    #include <llvm-c/TargetMachine.h>
+
+    LLVMModuleRef module;
+    LLVMBuilderRef builder;
+
+    extern FILE *yyin;
+    int yylex();
+
+
+    typedef struct node {
+        char *label;
+        struct node *left; 
+        struct node *right; 
+        char *token;
+        char *llvm_val;
+        char *llvm_type;
+    } Node;
+
+    void llvm_initialize() {
+        module = LLVMModuleCreateWithName("program");
+        builder = LLVMCreateBuilder();
+    }
+
+    void llvm_finalize(const char *filename) {
+        LLVMPrintModuleToFile(module, filename, NULL);
+        LLVMDisposeBuilder(builder);
+        LLVMDisposeModule(module);
+    }
+
+    LLVMValueRef gen_expression(Node *node) {
+        if (!node) {
+            fprintf(stderr, "[DEBUG] Nó nulo em gen_expression.\n");
+            return NULL;
+        }
+
+        fprintf(stderr, "[DEBUG] Processando nó em gen_expression: %s\n", node->label ? node->label : "(null)");
+
+        if (strcmp(node->label, "+") == 0) {
+            LLVMValueRef left = gen_expression(node->left);
+            LLVMValueRef right = gen_expression(node->right);
+            return LLVMBuildAdd(builder, left, right, "addtmp");
+        }
+
+        if (strcmp(node->label, "number") == 0) {
+            return LLVMConstInt(LLVMInt32Type(), atoi(node->llvm_val), 0);
+        }
+
+        fprintf(stderr, "[DEBUG] Tipo de nó não reconhecido em gen_expression: %s\n", node->label);
+        return NULL;
+    }
+
+
+    void generate_llvm(Node *tree) {
+        if (!tree) {
+            fprintf(stderr, "[DEBUG] Nó nulo encontrado em generate_llvm.\n");
+            return;
+        }
+
+        fprintf(stderr, "[DEBUG] Gerando LLVM para nó: %s\n", tree->label ? tree->label : "(null)");
+
+        if (tree->left) {
+            generate_llvm(tree->left);
+        } else {
+            fprintf(stderr, "[DEBUG] Nó esquerdo nulo para: %s\n", tree->label);
+        }
+
+        if (tree->right) {
+            generate_llvm(tree->right);
+        } else {
+            fprintf(stderr, "[DEBUG] Nó direito nulo para: %s\n", tree->label);
+        }
+
+        if (strcmp(tree->label, "expression") == 0) {
+            gen_expression(tree);
+        }
+    }
+
+
+
     
     void yyerror(const char *s);    
     void add(char);
@@ -21,7 +103,7 @@
     int q;
     int object_index = -1;
     char type[5];
-    int count_line;
+    extern int count_line;
     struct node *head;
     int count_errors=0;
     char errors[100][100];
@@ -40,12 +122,6 @@
             int scope_class;
             char * name_class;   
     } symbol_table[100];
-    
-    struct node { 
-        struct node *left; 
-        struct node *right; 
-        char *token; 
-    };
     
 %}
 %union {
@@ -300,20 +376,34 @@ int main(int argc, char **argv) {
         printf("-*-*-*-*-*-* Arvore sintatica - %s -*-*-*-*-**-*-*--*-\n\n", argv[i]);
         print_tree(head);
         printf("\n\n");
-    }  
+    }
+
     printf("-*-*-*-*-*-* Tabela de simbolos -*-*-*-*-**-*-*--*-\n");
     for(int i=0; i<count; i++) {
       printf("%-30s\t%-10s\t%-10s\t%-10d\t%-10d\t%-10d\t%-30s\t\n", symbol_table[i].name, symbol_table[i].data_type, symbol_table[i].type, symbol_table[i].scope, symbol_table[i].scope_class, symbol_table[i].line, symbol_table[i].name_class);
     }
-    for(int i=0;i<count;i++) {
-      free(symbol_table[i].name);
-      free(symbol_table[i].type);
-    }
+
    
     printf("Quantidade de erros:%d\n",count_errors);
     for(int i=0; i<count_errors; i++) {
       printf("%s\n",errors[i]);
-    }   
+    }
+
+    printf("Gerando código LLVM...\n");
+    llvm_initialize();
+    if (!head) {
+        fprintf(stderr, "Erro: Árvore sintática vazia. Verifique a entrada.\n");
+        exit(EXIT_FAILURE);
+    }
+    fprintf(stderr, "Árvore sintática construída com sucesso. Iniciando geração LLVM...\n");
+    generate_llvm(head);
+    llvm_finalize("output.ll");
+    printf("Código LLVM salvo em 'output.ll'.\n");  
+
+    for(int i=0;i<count;i++) {
+      free(symbol_table[i].name);
+      free(symbol_table[i].type);
+    }
   }
 
 void check_declaration(const char *c, int type) {
@@ -608,14 +698,19 @@ void printPreorder(struct node *tree) {
     }
 }
 
-struct node* mknode(struct node *left, struct node *right, char *token) {	
-	struct node *newnode = (struct node *)malloc(sizeof(struct node));
-	char *newstr = (char *)malloc(strlen(token)+1);
-	strcpy(newstr, token);
-	newnode->left = left;
-	newnode->right = right;
-	newnode->token = newstr;
-	return(newnode);
+struct node* mknode(struct node *left, struct node *right, char *token) {
+    struct node *newnode = (struct node *)malloc(sizeof(struct node));
+    if (!newnode) {
+        fprintf(stderr, "Erro: Falha ao alocar memória para nó.\n");
+        exit(EXIT_FAILURE);
+    }
+    newnode->label = token ? strdup(token) : NULL;
+    newnode->left = left;
+    newnode->right = right;
+    newnode->token = token ? strdup(token) : NULL;
+    newnode->llvm_val = NULL;
+    newnode->llvm_type = NULL;
+    return newnode;
 }
 
 void yyerror(const char* msg) {
